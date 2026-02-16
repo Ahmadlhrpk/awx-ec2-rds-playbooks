@@ -1,0 +1,7 @@
+---
+- name: Start/stop/restart EC2 and RDS instances
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Include ec2 startstop subtasks file
+      ansible.builtin.include_tasks: ec2_startstop_subtasks.yml

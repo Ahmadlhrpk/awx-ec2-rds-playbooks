@@ -1,0 +1,76 @@
+---
+- name: 'Set the variables'
+  ansible.builtin.set_fact:
+    aws_region: us-east-1
+    ec2_action: ''
+
+- name: 'Get instance ids from host variables'
+  ansible.builtin.set_fact:
+    aws_instance_id: "{{ hostvars[inventory_hostname].inst_id | default('') }}"
+    rds_db_identifier: "{{ hostvars[inventory_hostname].db_instance_id | default('') }}"
+
+# ============================================================================
+# EC2 INSTANCE MANAGEMENT
+# ============================================================================
+
+- name: 'Ensure the EC2 instance is {{ ec2_action }}'
+  amazon.aws.ec2_instance:
+    region: "{{ aws_region }}"
+    instance_ids: "{{ aws_instance_id }}"
+    state: "{{ ec2_action }}"
+    wait: true
+  delegate_to: localhost
+  when: 
+    - aws_instance_id != ''
+    - ec2_action in ["started", "stopped", "restarted"]
+
+- name: 'Gather EC2 instance information'
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    instance_ids: "{{ aws_instance_id }}"
+  register: ec2_info
+  delegate_to: localhost
+  when: aws_instance_id != ''
+
+- name: 'Display EC2 instance status'
+  ansible.builtin.debug:
+    msg: "EC2 instance {{ aws_instance_id }} is {{ ec2_info.instances[0].state.name }}"
+  when: 
+    - aws_instance_id != ''
+    - ec2_info.instances | length > 0
+
+# ============================================================================
+# RDS INSTANCE MANAGEMENT
+# ============================================================================
+
+- name: 'Convert EC2 action to RDS state'
+  ansible.builtin.set_fact:
+    rds_state: "{{ 'rebooted' if ec2_action == 'restarted' else ec2_action }}"
+  when: rds_db_identifier != ''
+
+- name: 'Ensure the RDS instance is {{ rds_state }}'
+  amazon.aws.rds_instance:
+    db_instance_identifier: "{{ rds_db_identifier }}"
+    state: "{{ rds_state }}"
+    region: "{{ aws_region }}"
+    wait: true
+  delegate_to: localhost
+  when: 
+    - rds_db_identifier != ''
+    - rds_state in ["started", "stopped", "rebooted"]
+
+- name: 'Gather RDS instance information'
+  amazon.aws.rds_instance_info:
+    db_instance_identifier: "{{ rds_db_identifier }}"
+    region: "{{ aws_region }}"
+  register: rds_info
+  delegate_to: localhost
+  when: rds_db_identifier != ''
+
+- name: 'Display RDS instance status'
+  ansible.builtin.debug:
+    msg: "RDS instance {{ rds_db_identifier }} is {{ rds_info.instances[0].db_instance_status }}"
+  when: 
+    - rds_db_identifier != ''
+    - rds_info.instances is defined
+    - rds_info.instances | length > 0
