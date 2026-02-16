@@ -2,7 +2,6 @@
 - name: 'Set the variables'
   ansible.builtin.set_fact:
     aws_region: us-east-1
-    ec2_action: ''
 
 - name: 'Get instance ids from host variables'
   ansible.builtin.set_fact:
