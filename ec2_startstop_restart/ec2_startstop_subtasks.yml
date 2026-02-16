@@ -6,9 +6,9 @@
   ansible.builtin.set_fact:
     aws_instance_id: "{{ hostvars[inventory_hostname].inst_id | default('') }}"
     rds_db_identifier: "{{ hostvars[inventory_hostname].db_instance_id | default('') }}"
-=========================================
-EC2 MANAGEMENT
-=========================================
+
+
+##EC2 MANAGEMENT
 
 - name: Manage EC2 instance
   amazon.aws.ec2_instance:
@@ -38,9 +38,8 @@ EC2 MANAGEMENT
 
 
 
-=========================================
-RDS UNIVERSAL MANAGEMENT
-=========================================
+
+##RDS UNIVERSAL MANAGEMENT
 
 - name: Check if RDS is a cluster
   amazon.aws.rds_cluster_info:
