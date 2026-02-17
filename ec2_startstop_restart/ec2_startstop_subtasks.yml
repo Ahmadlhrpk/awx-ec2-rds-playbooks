@@ -1,10 +1,3 @@
----
-- name: Start/Stop/Restart EC2 and RDS via STS Assume Role
-  hosts: all
-  gather_facts: false
-
-  tasks:
-
   # ============================================================
   # SET BASE VARIABLES
   # ============================================================
