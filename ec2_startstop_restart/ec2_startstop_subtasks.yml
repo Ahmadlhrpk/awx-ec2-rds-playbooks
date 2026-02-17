@@ -1,119 +1,202 @@
-- name: Set AWS region
-  ansible.builtin.set_fact:
-    aws_region: us-east-1
+---
+- name: Start/Stop/Restart EC2 and RDS via STS Assume Role
+  hosts: all
+  gather_facts: false
 
-- name: Get instance ids from host variables
-  ansible.builtin.set_fact:
-    aws_instance_id: "{{ hostvars[inventory_hostname].inst_id | default('') }}"
-    rds_db_identifier: "{{ hostvars[inventory_hostname].db_instance_id | default('') }}"
+  tasks:
 
+  # ============================================================
+  # SET BASE VARIABLES
+  # ============================================================
 
-##EC2 MANAGEMENT
+  - name: Set base AWS variables
+    ansible.builtin.set_fact:
+      assume_role_instance: localhost
+      aws_region: us-east-1
+      sts_role_name: BSLOPS-Automation
+      aws_accounts:
+        - { account_id: 720731127848, location: "AWS EMEA Non-Prod VPC" }
+        - { account_id: 007887086890, location: "AWS EMEA Shared Services VPC" }
+        - { account_id: 954976326790, location: "AWS EMEA Production VPC" }
+        - { account_id: 877009147629, location: "AWS Ireland - GIO PROD VPC" }
+        - { account_id: 410477946908, location: "AWS Ireland - GIO NON-PROD" }
+        - { account_id: 749491338664, location: "AWS Ireland - GIO SHARED" }
 
-- name: Manage EC2 instance
-  amazon.aws.ec2_instance:
-    region: "{{ aws_region }}"
-    instance_ids: "{{ aws_instance_id }}"
-    state: "{{ ec2_action }}"
-    wait: true
-  delegate_to: localhost
-  when:
-    - aws_instance_id != ''
-    - ec2_action in ["started", "stopped", "restarted"]
+  # ============================================================
+  # READ HOST VARIABLES SAFELY
+  # ============================================================
 
-- name: Get EC2 info
-  amazon.aws.ec2_instance_info:
-    region: "{{ aws_region }}"
-    instance_ids: "{{ aws_instance_id }}"
-  register: ec2_info
-  delegate_to: localhost
-  when: aws_instance_id != ''
+  - name: Read host variables
+    ansible.builtin.set_fact:
+      aws_instance_id: "{{ hostvars[inventory_hostname].inst_id | default('') }}"
+      rds_db_identifier: "{{ hostvars[inventory_hostname].db_instance_id | default('') }}"
+      rds_cluster_identifier: "{{ hostvars[inventory_hostname].db_cluster_id | default('') }}"
+      aws_location: "{{ hostvars[inventory_hostname].location | default('') }}"
+      ec2_action: "{{ hostvars[inventory_hostname].ec2_action | default('') }}"
 
-- name: Show EC2 status
-  debug:
-    msg: "EC2 {{ aws_instance_id }} is {{ ec2_info.instances[0].state.name }}"
-  when:
-    - aws_instance_id != ''
-    - ec2_info.instances | length > 0
+  - name: Validate action provided
+    ansible.builtin.fail:
+      msg: "ec2_action must be started, stopped, or restarted"
+    when: ec2_action not in ["started", "stopped", "restarted"]
 
+  # ============================================================
+  # MAP LOCATION → ACCOUNT ID
+  # ============================================================
 
+  - name: Resolve AWS account ID from location
+    ansible.builtin.set_fact:
+      aws_account_id: "{{ item.account_id }}"
+    loop: "{{ aws_accounts }}"
+    when: item.location == aws_location
 
+  - name: Fail if no account matched
+    ansible.builtin.fail:
+      msg: "No AWS account mapping found for location: {{ aws_location }}"
+    when: aws_account_id is not defined
 
-##RDS UNIVERSAL MANAGEMENT
+  # ============================================================
+  # ASSUME ROLE
+  # ============================================================
 
-- name: Check if RDS is a cluster
-  amazon.aws.rds_cluster_info:
-    db_cluster_identifier: "{{ rds_db_identifier }}"
-    region: "{{ aws_region }}"
-  register: cluster_info
-  delegate_to: localhost
-  failed_when: false
-  when: rds_db_identifier != ''
+  - name: Assume role in target AWS account
+    amazon.aws.sts_assume_role:
+      role_arn: "arn:aws:iam::{{ aws_account_id }}:role/{{ sts_role_name }}"
+      role_session_name: "AWX-Automation-Session"
+      region: "{{ aws_region }}"
+    register: assumed_role
+    no_log: true
+    delegate_to: "{{ assume_role_instance }}"
 
+  # ============================================================
+  # CONVERT RESTART FOR RDS
+  # ============================================================
 
+  - name: Convert restart to reboot for RDS
+    ansible.builtin.set_fact:
+      rds_state: "{{ 'rebooted' if ec2_action == 'restarted' else ec2_action }}"
+    when: rds_db_identifier != '' or rds_cluster_identifier != ''
 
-- name: Check if RDS is standard instance
-  amazon.aws.rds_instance_info:
-    db_instance_identifier: "{{ rds_db_identifier }}"
-    region: "{{ aws_region }}"
-  register: instance_info
-  delegate_to: localhost
-  failed_when: false
-  when: rds_db_identifier != ''
+  # ============================================================
+  # EC2 MANAGEMENT
+  # ============================================================
 
+  - name: Manage EC2 instance
+    amazon.aws.ec2_instance:
+      region: "{{ aws_region }}"
+      instance_ids: "{{ aws_instance_id }}"
+      state: "{{ ec2_action }}"
+      wait: true
+    environment:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+    delegate_to: localhost
+    when:
+      - aws_instance_id != ''
+      - ec2_action in ["started", "stopped", "restarted"]
 
-- name: Map restart to reboot
-  set_fact:
-    rds_action: "{{ 'rebooted' if ec2_action == 'restarted' else ec2_action }}"
-  when: rds_db_identifier != ''
+  - name: Gather EC2 info
+    amazon.aws.ec2_instance_info:
+      region: "{{ aws_region }}"
+      instance_ids: "{{ aws_instance_id }}"
+    register: ec2_info
+    environment:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+    delegate_to: localhost
+    when: aws_instance_id != ''
 
+  - name: Display EC2 status
+    ansible.builtin.debug:
+      msg: "EC2 instance {{ aws_instance_id }} is {{ ec2_info.instances[0].state.name }}"
+    when:
+      - aws_instance_id != ''
+      - ec2_info.instances | length > 0
 
+  # ============================================================
+  # RDS INSTANCE MANAGEMENT
+  # ============================================================
 
-- name: Manage Aurora cluster
-  amazon.aws.rds_cluster:
-    db_cluster_identifier: "{{ rds_db_identifier }}"
-    state: "{{ rds_action }}"
-    region: "{{ aws_region }}"
-    wait: true
-  delegate_to: localhost
-  when:
-    - rds_db_identifier != ''
-    - cluster_info.clusters is defined
-    - cluster_info.clusters | length > 0
-    - rds_action in ["started", "stopped", "rebooted"]
+  - name: Manage RDS instance
+    amazon.aws.rds_instance:
+      db_instance_identifier: "{{ rds_db_identifier }}"
+      state: "{{ rds_state }}"
+      region: "{{ aws_region }}"
+      wait: true
+    environment:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+    delegate_to: localhost
+    when:
+      - rds_db_identifier != ''
+      - rds_state in ["started", "stopped", "rebooted"]
 
+  - name: Gather RDS instance info
+    amazon.aws.rds_instance_info:
+      db_instance_identifier: "{{ rds_db_identifier }}"
+      region: "{{ aws_region }}"
+    register: rds_info
+    environment:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+    delegate_to: localhost
+    when: rds_db_identifier != ''
 
+  - name: Display RDS status
+    ansible.builtin.debug:
+      msg: "RDS instance {{ rds_db_identifier }} is {{ rds_info.instances[0].db_instance_status }}"
+    when:
+      - rds_db_identifier != ''
+      - rds_info.instances | length > 0
 
-- name: Manage standard RDS instance
-  amazon.aws.rds_instance:
-    db_instance_identifier: "{{ rds_db_identifier }}"
-    state: "{{ rds_action }}"
-    region: "{{ aws_region }}"
-    wait: true
-  delegate_to: localhost
-  when:
-    - rds_db_identifier != ''
-    - instance_info.instances is defined
-    - instance_info.instances | length > 0
-    - rds_action in ["started", "stopped", "rebooted"]
+  # ============================================================
+  # AURORA CLUSTER MANAGEMENT
+  # ============================================================
 
+  - name: Manage Aurora cluster
+    amazon.aws.rds_cluster:
+      db_cluster_identifier: "{{ rds_cluster_identifier }}"
+      state: "{{ rds_state }}"
+      region: "{{ aws_region }}"
+      wait: true
+    environment:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+    delegate_to: localhost
+    when:
+      - rds_cluster_identifier != ''
+      - rds_state in ["started", "stopped"]
 
+  - name: Gather Aurora cluster info
+    amazon.aws.rds_cluster_info:
+      db_cluster_identifier: "{{ rds_cluster_identifier }}"
+      region: "{{ aws_region }}"
+    register: cluster_info
+    environment:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+    delegate_to: localhost
+    when: rds_cluster_identifier != ''
 
+  - name: Display Aurora cluster status
+    ansible.builtin.debug:
+      msg: "Aurora cluster {{ rds_cluster_identifier }} is {{ cluster_info.clusters[0].status }}"
+    when:
+      - rds_cluster_identifier != ''
+      - cluster_info.clusters | length > 0
 
-- name: Show Aurora status
-  debug:
-    msg: "Aurora cluster {{ rds_db_identifier }} is {{ cluster_info.clusters[0].status }}"
-  when:
-    - cluster_info.clusters is defined
-    - cluster_info.clusters | length > 0
+  # ============================================================
+  # RDS 7-DAY AUTO-START WARNING
+  # ============================================================
 
-- name: Show RDS instance status
-  debug:
-    msg: "RDS instance {{ rds_db_identifier }} is {{ instance_info.instances[0].db_instance_status }}"
-  when:
-    - instance_info.instances is defined
-    - instance_info.instances | length > 0
-
-
-
-
+  - name: Warn about 7-day RDS auto restart
+    ansible.builtin.debug:
+      msg: "WARNING: RDS automatically starts after 7 days if stopped."
+    when:
+      - ec2_action == "stopped"
+      - rds_db_identifier != '' or rds_cluster_identifier != ''
