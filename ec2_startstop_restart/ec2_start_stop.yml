@@ -3,5 +3,5 @@
   hosts: all
   gather_facts: false
   tasks:
-    - name: Include ec2 startstop subtasks file
+    - name: Include ec2/rds startstop subtasks file
       ansible.builtin.include_tasks: ec2_rds_startstop_subtasks.yml
