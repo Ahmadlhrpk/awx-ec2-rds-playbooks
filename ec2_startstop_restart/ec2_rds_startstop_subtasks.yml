@@ -5,7 +5,7 @@
   - name: Set base AWS variables
     ansible.builtin.set_fact:
       assume_role_instance: localhost
-      aws_region: us-east-1
+      aws_region: "{{ aws_region | default('us-east-1') }}"
       sts_role_name: BSLOPS-Automation
       aws_accounts:
         - { account_id: 720731127848, location: "AWS EMEA Non-Prod VPC" }
